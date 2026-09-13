@@ -2,9 +2,14 @@ package random_beauty
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestRandomMageClientNextUsesSafetyFilters(t *testing.T) {
@@ -25,8 +30,8 @@ func TestRandomMageClientNextUsesSafetyFilters(t *testing.T) {
 				t.Errorf("query %s = %q, want %q", key, got, value)
 			}
 		}
-		if len(query["excluded_tags"]) == 0 {
-			t.Error("excluded_tags must not be empty")
+		if len(query["excluded_tags"]) != maxProviderExcludedTags {
+			t.Errorf("excluded_tags count = %d, want %d", len(query["excluded_tags"]), maxProviderExcludedTags)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -60,6 +65,54 @@ func TestRandomMageClientNextUsesSafetyFilters(t *testing.T) {
 	}
 	if candidate.Title != "风景" || candidate.Author != "画师" || len(candidate.Tags) != 2 {
 		t.Fatalf("Next() metadata = %+v", candidate)
+	}
+}
+
+func TestRandomMageClientWarnsWhenCappingExcludedTags(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(validResponse("")))
+	}))
+	defer server.Close()
+
+	core, logs := observer.New(zap.WarnLevel)
+	client, err := newRandomMageClient(server.URL, server.Client(), 720, 720, 100, true)
+	if err != nil {
+		t.Fatalf("newRandomMageClient() error = %v", err)
+	}
+	client.logger = zap.New(core)
+	if _, err := client.Next(context.Background()); err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	entries := logs.FilterMessage("random_beauty: 上游排除标签超过限制，已截断").All()
+	if len(entries) != 1 {
+		t.Fatalf("warning count = %d, want 1", len(entries))
+	}
+	if got := entries[0].ContextMap()["requested"]; fmt.Sprint(got) != "52" {
+		t.Fatalf("warning requested = %#v, want 52", got)
+	}
+	if got := entries[0].ContextMap()["limit"]; fmt.Sprint(got) != fmt.Sprint(maxProviderExcludedTags) {
+		t.Fatalf("warning limit = %#v, want %d", got, maxProviderExcludedTags)
+	}
+}
+
+func TestProviderExcludedTagsDropsOnlyLowGainOverflowTerms(t *testing.T) {
+	client := &RandomMageClient{logger: zap.NewNop()}
+	tags := client.providerExcludedTags()
+	if len(tags) != maxProviderExcludedTags {
+		t.Fatalf("providerExcludedTags() count = %d, want %d", len(tags), maxProviderExcludedTags)
+	}
+	for _, required := range []string{"R-18", "裸体", "泳装", "スク水", "nude", "sexualized"} {
+		if !slices.Contains(tags, required) {
+			t.Fatalf("providerExcludedTags() omitted required safety term %q", required)
+		}
+	}
+	for _, omitted := range []string{"school swimsuit", "sex toy"} {
+		for _, tag := range tags {
+			if tag == omitted {
+				t.Fatalf("providerExcludedTags() should omit low-gain overflow term %q", omitted)
+			}
+		}
 	}
 }
 

@@ -10,9 +10,20 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+
+	"go.uber.org/zap"
 )
 
-const maxProviderResponseBytes = 1 << 20
+const (
+	maxProviderResponseBytes = 1 << 20
+	maxProviderExcludedTags  = 50
+)
+
+var providerExcludedTagOmissions = map[string]struct{}{
+	"school swimsuit": {},
+	"sex toy":         {},
+}
 
 // Candidate 是经过上游字段校验的候选作品。
 type Candidate struct {
@@ -39,6 +50,8 @@ type RandomMageClient struct {
 	minWidth     int
 	minHeight    int
 	minBookmarks int
+	logger       *zap.Logger
+	warnOnce     sync.Once
 }
 
 func newRandomMageClient(baseURL string, client *http.Client, minWidth, minHeight, minBookmarks int, allowInsecureForTest bool) (*RandomMageClient, error) {
@@ -71,6 +84,7 @@ func newRandomMageClient(baseURL string, client *http.Client, minWidth, minHeigh
 		minWidth:     minWidth,
 		minHeight:    minHeight,
 		minBookmarks: minBookmarks,
+		logger:       zap.NewNop(),
 	}, nil
 }
 
@@ -108,7 +122,8 @@ func (c *RandomMageClient) Next(ctx context.Context) (*Candidate, error) {
 	query.Set("min_width", strconv.Itoa(c.minWidth))
 	query.Set("min_height", strconv.Itoa(c.minHeight))
 	query.Set("min_bookmarks", strconv.Itoa(c.minBookmarks))
-	for _, tag := range excludedTags() {
+	tags := c.providerExcludedTags()
+	for _, tag := range tags {
 		query.Add("excluded_tags", tag)
 	}
 	endpoint.RawQuery = query.Encode()
@@ -124,6 +139,8 @@ func (c *RandomMageClient) Next(ctx context.Context) (*Candidate, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		c.loggerOrNop().Warn("random_beauty: 上游候选接口返回非成功状态",
+			zap.Int("status", resp.StatusCode))
 		return nil, fmt.Errorf("random_beauty: 候选接口状态码 %d", resp.StatusCode)
 	}
 
@@ -171,6 +188,45 @@ func (c *RandomMageClient) Next(ctx context.Context) (*Candidate, error) {
 		return nil, errors.New("random_beauty: 候选元数据超出限制")
 	}
 	return candidate, nil
+}
+
+func (c *RandomMageClient) providerExcludedTags() []string {
+	tags := excludedTags()
+	if len(tags) <= maxProviderExcludedTags {
+		return tags
+	}
+	overflow := len(tags) - maxProviderExcludedTags
+	selected := make([]string, 0, maxProviderExcludedTags)
+	omitted := 0
+	for _, tag := range tags {
+		if omitted < overflow {
+			if _, skip := providerExcludedTagOmissions[tag]; skip {
+				omitted++
+				continue
+			}
+		}
+		selected = append(selected, tag)
+	}
+	if len(selected) > maxProviderExcludedTags {
+		selected = selected[:maxProviderExcludedTags]
+		omitted = len(tags) - len(selected)
+	}
+	c.warnOnce.Do(func() {
+		c.loggerOrNop().Warn(
+			"random_beauty: 上游排除标签超过限制，已截断",
+			zap.Int("requested", len(tags)),
+			zap.Int("limit", maxProviderExcludedTags),
+			zap.Int("omitted", omitted),
+		)
+	})
+	return selected
+}
+
+func (c *RandomMageClient) loggerOrNop() *zap.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return zap.NewNop()
 }
 
 func validateLocalPath(localPath string) error {

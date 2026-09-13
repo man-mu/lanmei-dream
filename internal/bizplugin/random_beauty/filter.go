@@ -12,6 +12,8 @@ const (
 )
 
 // mandatoryExcludedTags 是不可通过配置放宽的安全下限。
+// 该列表用于本地完整复核；Random Mage 的请求参数有独立的 50 项上限，
+// 由 providerExcludedTags 在发送前截断。
 var mandatoryExcludedTags = []string{
 	"R-18", "R-18G", "NSFW", "裸体", "全裸", "裸胸", "乳首", "乳房",
 	"性行为", "色情", "情色", "性器官", "成人用品", "内衣", "泳装", "比基尼",

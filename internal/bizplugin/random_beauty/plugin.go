@@ -46,6 +46,7 @@ func New(cfg config.RandomBeautyConfig, moderator ImageModerator, logger *zap.Lo
 	if err != nil {
 		return nil, err
 	}
+	provider.logger = logger
 	downloader, err := newImageDownloader(cfg.APIBaseURL, client, cfg.MaxImageBytes, cfg.MinWidth, cfg.MinHeight, false)
 	if err != nil {
 		return nil, err
